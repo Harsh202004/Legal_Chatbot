@@ -20,13 +20,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 INDEX_DIR = "embeddings"
 os.makedirs(INDEX_DIR, exist_ok=True)
-
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 st.set_page_config(page_title="Legal Chatbot & Challan Analyzer", layout="wide")
-st.title("🧑‍⚖️ Indian Legal Chatbot & Traffic Challan Analyzer")
+st.title("🧑‍⚖️ Indian Legal Chatbot & Challan Analyzer")
 
-# -------------------- Utility Functions --------------------
+# -------------------- Helper Functions --------------------
 @st.cache_resource
 def load_embedding_model(name: str = EMBEDDING_MODEL_NAME):
     return SentenceTransformer(name)
@@ -75,15 +74,15 @@ def retrieve(index, meta, query_emb, k=4):
             results.append({**meta[idx], "score": float(score)})
     return results
 
-def ollama_call(system_prompt, user_prompt):
+def ollama_call(prompt):
     try:
-        payload = {"model": "phi3", "prompt": f"{system_prompt}\n\n{user_prompt}", "stream": False}
+        payload = {"model": "phi3", "prompt": prompt, "stream": False}
         r = requests.post("http://localhost:11434/api/generate", json=payload, timeout=600)
         return r.json().get("response", "")
     except Exception as e:
         return f"[Ollama error: {e}]"
 
-# -------------------- PDF + Image Unified Interface --------------------
+# -------------------- Combined PDF + Image Uploader --------------------
 st.header("📄 Upload Legal PDFs or 📸 Challan Images")
 
 uploaded_files = st.file_uploader(
@@ -92,12 +91,13 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+model = load_embedding_model()
+
 if uploaded_files:
-    model = load_embedding_model()
     for file in uploaded_files:
         file_ext = file.name.lower().split(".")[-1]
 
-        # -------------------- PDF Processing --------------------
+        # -------------------- PDF Upload --------------------
         if file_ext == "pdf":
             with st.spinner(f"Processing PDF: {file.name}"):
                 pages = pdf_to_text(file.read())
@@ -115,9 +115,9 @@ if uploaded_files:
                 index = build_faiss_index(embs)
                 prefix = os.path.splitext(file.name)[0]
                 save_index(index, meta, prefix)
-                st.success(f"Indexed {len(chunks)} chunks → prefix: {prefix}")
+                st.success(f"✅ Indexed {len(chunks)} chunks → prefix: {prefix}")
 
-        # -------------------- Challan (Image) Processing --------------------
+        # -------------------- Challan Upload --------------------
         elif file_ext in ["jpg", "jpeg", "png"]:
             with st.spinner(f"Analyzing Challan: {file.name}"):
                 img = Image.open(file).convert("RGB")
@@ -138,32 +138,58 @@ if uploaded_files:
                 st.markdown(f"**📜 Section:** {section}")
                 st.markdown(f"**✅ What To Do:** {advice}")
 
-                # Optional: match with indexed laws
-                if os.listdir(INDEX_DIR):
-                    try:
-                        index, meta = load_index("Traffic_Law")
-                        q_emb = embed_texts(model, [offence])
-                        retrieved = retrieve(index, meta, q_emb, 2)
-                        if retrieved:
-                            st.markdown("#### 📘 Related Law Sections:")
-                            for r in retrieved:
-                                st.write(f"Page {r['page_number']}: {r['text'][:300]}...")
-                        else:
-                            st.info("No relevant section found in Traffic Law PDF.")
-                    except Exception:
-                        st.info("Upload and index Traffic_Law.pdf first for section references.")
+# -------------------- Step 2: Ask Questions --------------------
+st.header("🤖 Ask a Question about Your Uploaded PDFs or Challan")
+
+index_prefix = st.text_input("Enter the index prefix (e.g., Traffic_Law)")
+question = st.text_area("Type your question here (e.g., 'What is the fine for overspeeding?')")
+
+if st.button("Get Answer"):
+    if not index_prefix:
+        st.warning("⚠️ Please enter an index prefix.")
+    elif not question:
+        st.warning("⚠️ Please enter your question.")
+    else:
+        try:
+            index, meta = load_index(index_prefix)
+        except Exception as e:
+            st.error(f"❌ Could not load index: {e}")
+            st.stop()
+
+        model = load_embedding_model()
+        q_emb = embed_texts(model, [question])
+        retrieved = retrieve(index, meta, q_emb, 3)
+
+        st.subheader("📘 Retrieved Context (Top Matches)")
+        for r in retrieved:
+            st.write(f"**Page {r.get('page_number')}** — {r.get('text')[:500]}...")
+
+        # Build simple, human-friendly LLM prompt
+        context = "\n".join([r.get("text") for r in retrieved])
+        prompt = (
+            f"Question: {question}\n\n"
+            f"Context:\n{context}\n\n"
+            "Explain the answer in simple, friendly language that a normal person can understand. "
+            "Avoid legal jargon and keep it concise with examples if helpful."
+        )
+
+        with st.spinner("💬 Generating answer..."):
+            answer = ollama_call(prompt)
+
+        st.subheader("🧠 Simple Explanation")
+        st.write(answer)
 
 # -------------------- Sidebar --------------------
-st.sidebar.header("ℹ️ Status")
+st.sidebar.header("ℹ️ Indexed Files")
 pdfs = [f for f in os.listdir(INDEX_DIR) if f.endswith(".index")]
 if pdfs:
-    st.sidebar.success(f"Indexed Laws: {len(pdfs)}")
+    st.sidebar.success(f"Available Indexes: {len(pdfs)}")
     for p in pdfs:
         st.sidebar.write(f"- {p[:-6]}")
 else:
     st.sidebar.warning("No PDFs indexed yet.")
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"LLM Provider: `{LLM_PROVIDER}`")
-st.sidebar.write("Model: `phi3` via Ollama (local)")
-st.sidebar.markdown("Developed for simple citizen-friendly legal explanations 🇮🇳")
+st.sidebar.write("Model: **Phi-3 (Ollama)** — running locally")
+st.sidebar.write("Language: Simple Indian English 🇮🇳")
+st.sidebar.markdown("Built for citizens to easily understand Indian laws & traffic fines ⚖️")
